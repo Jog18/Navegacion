@@ -2,18 +2,22 @@
 Sistema de Navegación para Robot Móvil Ackermann con Visión por Computadora.
 
 Punto de entrada principal de la aplicación.
+El robot físico es controlado por un ESP32 mediante comunicación MQTT.
 
 Uso:
-    python main.py                  # Cámara por defecto (índice 0)
-    python main.py --camera 1       # Cámara específica
-    python main.py --image test.png # Imagen estática (pruebas)
-    python main.py --simulate       # Modo simulación sin cámara
+    python main.py                              # Cámara por defecto
+    python main.py --camera 1                   # Cámara específica
+    python main.py --image test.png             # Imagen estática (pruebas)
+    python main.py --simulate                   # Modo simulación sin cámara
+    python main.py --broker 192.168.1.100       # Broker MQTT específico
+    python main.py --broker 192.168.1.100 --port 1883  # Broker + puerto
 
 Módulos:
-    vision/     - Captura de cámara y detección del robot
-    navigation/ - Generación de objetivo, trayectoria y Pure Pursuit
-    control/    - Controlador del robot (cinemática Ackermann)
-    ui/         - Interfaz gráfica PyQt5
+    vision/          - Captura de cámara y detección del robot
+    navigation/      - Generación de objetivo, trayectoria y Pure Pursuit
+    control/         - Controlador del robot (cinemática Ackermann)
+    communication/   - Cliente MQTT para enviar comandos al ESP32
+    ui/              - Interfaz gráfica PyQt5
 """
 
 import sys
@@ -39,6 +43,14 @@ def parse_args():
         "--simulate", action="store_true",
         help="Modo simulación sin cámara"
     )
+    parser.add_argument(
+        "--broker", type=str, default="localhost",
+        help="Dirección IP del broker MQTT (por defecto: localhost)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=1883,
+        help="Puerto del broker MQTT (por defecto: 1883)"
+    )
     return parser.parse_args()
 
 
@@ -56,7 +68,8 @@ def main():
     else:
         source = args.camera
 
-    window = MainWindow(camera_source=source)
+    mqtt_config = {"broker": args.broker, "port": args.port}
+    window = MainWindow(camera_source=source, mqtt_config=mqtt_config)
     window.show()
 
     sys.exit(app.exec_())

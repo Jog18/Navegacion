@@ -20,20 +20,29 @@ from PyQt5.QtGui import QImage, QPixmap, QFont
 from vision.camera import Camera
 from vision.detector import RobotDetector, RobotPose
 from control.robot_controller import RobotController, RobotState
+from communication.mqtt_client import MQTTClient
 
 
 class MainWindow(QMainWindow):
     """Ventana principal de la aplicación de navegación robótica."""
 
-    def __init__(self, camera_source=0):
+    def __init__(self, camera_source=0, mqtt_config=None):
         super().__init__()
-        self.setWindowTitle("Navegación Robot Ackermann - Visión por Computadora")
-        self.setMinimumSize(900, 650)
+        self.setWindowTitle("Navegación Robot Ackermann - ESP32 MQTT")
+        self.setMinimumSize(1000, 650)
 
         # Componentes del sistema
         self.camera = Camera(source=camera_source)
         self.detector = RobotDetector()
         self.controller = RobotController()
+
+        # Comunicación MQTT con ESP32
+        if mqtt_config is None:
+            mqtt_config = {"broker": "localhost", "port": 1883}
+        self.mqtt = MQTTClient(
+            broker=mqtt_config["broker"],
+            port=mqtt_config["port"],
+        )
 
         # Estado actual
         self.current_pose = RobotPose(x=0, y=0, theta=0, detected=False)
@@ -144,6 +153,39 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.lbl_cte, 4, 0)
         right_panel.addWidget(nav_group)
 
+        # Grupo: Conexión MQTT / ESP32
+        mqtt_group = QGroupBox("ESP32 - MQTT")
+        mqtt_layout = QGridLayout()
+        mqtt_group.setLayout(mqtt_layout)
+
+        mqtt_layout.addWidget(QLabel("Broker:"), 0, 0)
+        self.input_broker = QLineEdit(self.mqtt.broker)
+        mqtt_layout.addWidget(self.input_broker, 0, 1)
+
+        mqtt_layout.addWidget(QLabel("Puerto:"), 1, 0)
+        self.input_port = QLineEdit(str(self.mqtt.port))
+        mqtt_layout.addWidget(self.input_port, 1, 1)
+
+        self.btn_mqtt_connect = QPushButton("Conectar")
+        self.btn_mqtt_connect.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; padding: 6px; "
+            "border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #2ecc71; }"
+        )
+        self.btn_mqtt_connect.clicked.connect(self._on_mqtt_toggle)
+        mqtt_layout.addWidget(self.btn_mqtt_connect, 2, 0, 1, 2)
+
+        self.lbl_mqtt_status = QLabel("MQTT: Desconectado")
+        self.lbl_mqtt_status.setFont(font_mono)
+        self.lbl_mqtt_status.setStyleSheet("color: #e74c3c;")
+        mqtt_layout.addWidget(self.lbl_mqtt_status, 3, 0, 1, 2)
+
+        self.lbl_mqtt_cmd = QLabel("Cmd: ---")
+        self.lbl_mqtt_cmd.setFont(font_mono)
+        mqtt_layout.addWidget(self.lbl_mqtt_cmd, 4, 0, 1, 2)
+
+        right_panel.addWidget(mqtt_group)
+
         right_panel.addStretch()
 
         # Barra de estado
@@ -172,6 +214,25 @@ class MainWindow(QMainWindow):
 
         # Actualizar control si está navegando
         nav_info = self.controller.update(self.current_pose)
+
+        # Enviar comandos al ESP32 por MQTT
+        if nav_info.state == RobotState.NAVIGATING:
+            cmd = self.controller.compute_command(nav_info)
+            self.mqtt.send_command(cmd.left_pwm, cmd.right_pwm, cmd.servo_angle)
+            self.lbl_mqtt_cmd.setText(
+                f"L:{cmd.left_pwm} R:{cmd.right_pwm} S:{cmd.servo_angle:.0f}°"
+            )
+        elif nav_info.state == RobotState.REACHED:
+            self.mqtt.send_stop()
+            self.lbl_mqtt_cmd.setText("Cmd: STOP (llegó)")
+
+        # Actualizar indicador de conexión MQTT
+        if self.mqtt.connected:
+            self.lbl_mqtt_status.setText("MQTT: Conectado")
+            self.lbl_mqtt_status.setStyleSheet("color: #2ecc71;")
+        else:
+            self.lbl_mqtt_status.setText("MQTT: Desconectado")
+            self.lbl_mqtt_status.setStyleSheet("color: #e74c3c;")
 
         # Dibujar sobre el frame
         display = self._draw_overlay(frame, nav_info)
@@ -320,13 +381,47 @@ class MainWindow(QMainWindow):
             f"Comando enviado: distancia={distance:.0f} px, ángulo={angle:.0f}°"
         )
 
+    def _on_mqtt_toggle(self):
+        """Conecta o desconecta del broker MQTT."""
+        if self.mqtt.connected:
+            self.mqtt.disconnect()
+            self.btn_mqtt_connect.setText("Conectar")
+            self.btn_mqtt_connect.setStyleSheet(
+                "QPushButton { background-color: #27ae60; color: white; padding: 6px; "
+                "border-radius: 4px; font-weight: bold; }"
+                "QPushButton:hover { background-color: #2ecc71; }"
+            )
+            self.statusBar().showMessage("MQTT desconectado")
+        else:
+            broker = self.input_broker.text().strip()
+            try:
+                port = int(self.input_port.text().strip())
+            except ValueError:
+                self.statusBar().showMessage("Error: Puerto inválido")
+                return
+
+            self.mqtt.broker = broker
+            self.mqtt.port = port
+            self.mqtt.connect()
+            self.btn_mqtt_connect.setText("Desconectar")
+            self.btn_mqtt_connect.setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; padding: 6px; "
+                "border-radius: 4px; font-weight: bold; }"
+                "QPushButton:hover { background-color: #c0392b; }"
+            )
+            self.statusBar().showMessage(f"Conectando a MQTT {broker}:{port}...")
+
     def _on_stop(self):
         """Callback del botón Detener."""
         self.controller.stop()
+        self.mqtt.send_stop()
+        self.lbl_mqtt_cmd.setText("Cmd: STOP")
         self.statusBar().showMessage("Robot detenido")
 
     def closeEvent(self, event):
         """Limpieza al cerrar la ventana."""
         self.timer.stop()
+        self.mqtt.send_stop()
+        self.mqtt.disconnect()
         self.camera.release()
         event.accept()
