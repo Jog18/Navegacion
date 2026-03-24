@@ -13,7 +13,7 @@ Camara cenital → Deteccion (OpenCV) → Pose del robot (x, y, theta)
                                            ↓
                                    Comandos (PWM + servo)
                                            ↓
-                                   MQTT → ESP32 → Motores
+                                   MQTT → ESP32 → Motor + Servo
 ```
 
 ---
@@ -22,8 +22,8 @@ Camara cenital → Deteccion (OpenCV) → Pose del robot (x, y, theta)
 
 ### Robot fisico
 - **ESP32** (microcontrolador principal del robot)
-- **2 motores DC** con driver puente H (tipo L298N o similar)
-- **1 servo** para la direccion (mecanismo Ackermann)
+- **1 motor DC** de traccion con driver puente H (tipo L298N o similar)
+- **1 servo** para la direccion (mecanismo Ackermann puro)
 - **2 marcadores de color** pegados al robot:
   - **Marcador frontal: color VERDE** (indica la parte delantera)
   - **Marcador trasero: color AZUL** (indica la parte posterior)
@@ -31,15 +31,12 @@ Camara cenital → Deteccion (OpenCV) → Pose del robot (x, y, theta)
 
 ### Conexiones del ESP32
 
-| Componente         | Pin ESP32 | Funcion             |
-|--------------------|-----------|---------------------|
-| Motor izq. ENA     | GPIO 25   | PWM motor izquierdo |
-| Motor izq. IN1     | GPIO 26   | Direccion motor izq |
-| Motor izq. IN2     | GPIO 27   | Direccion motor izq |
-| Motor der. ENB     | GPIO 14   | PWM motor derecho   |
-| Motor der. IN3     | GPIO 12   | Direccion motor der |
-| Motor der. IN4     | GPIO 13   | Direccion motor der |
-| Servo direccion    | GPIO 15   | Control del servo   |
+| Componente         | Pin ESP32 | Funcion                      |
+|--------------------|-----------|------------------------------|
+| Motor ENA          | GPIO 25   | PWM motor de traccion        |
+| Motor IN1          | GPIO 26   | Direccion del motor (avance) |
+| Motor IN2          | GPIO 27   | Direccion del motor (retro)  |
+| Servo direccion    | GPIO 13   | Control del servo Ackermann  |
 
 ### Infraestructura
 - **Camara USB o webcam** montada en posicion cenital (mirando hacia abajo) sobre el area de trabajo
@@ -213,7 +210,7 @@ La ventana tiene dos paneles:
 - Campos para IP del broker y puerto
 - **Boton "Conectar"**: inicia la conexion MQTT
 - Indicador de estado (Conectado/Desconectado)
-- Ultimo comando enviado (PWM izq, PWM der, angulo servo)
+- Ultimo comando enviado (PWM motor, angulo servo)
 
 ---
 
@@ -295,7 +292,8 @@ Maquina de estados:
 
 Conversion a comandos de hardware:
 - Angulo del servo = 90° - angulo_de_direccion (invertido)
-- PWM diferencial: aplica un factor de 30% segun el angulo de giro
+- Un unico valor PWM proporcional a la velocidad calculada (sin control diferencial)
+- La direccion se controla exclusivamente mediante el servo (Ackermann puro)
 - Rango servo: [45°, 135°] (centro en 90°)
 
 ### 6. Comunicacion MQTT (`communication/mqtt_client.py`)
@@ -307,8 +305,7 @@ Conversion a comandos de hardware:
 **Formato del comando:**
 ```json
 {
-    "left_pwm": 150,
-    "right_pwm": 140,
+    "pwm": 150,
     "servo": 85.0,
     "action": "move"
 }
@@ -317,8 +314,7 @@ Conversion a comandos de hardware:
 **Formato de parada:**
 ```json
 {
-    "left_pwm": 0,
-    "right_pwm": 0,
+    "pwm": 0,
     "servo": 90.0,
     "action": "stop"
 }
@@ -347,7 +343,7 @@ Conversion a comandos de hardware:
 | `wheelbase`        | 50.0    | Distancia entre ejes del robot (px)        |
 | `max_steering_deg` | 35.0    | Angulo maximo de giro (grados)             |
 | `lookahead`        | 30.0    | Distancia de anticipacion Pure Pursuit (px)|
-| `max_velocity_pwm` | 255     | PWM maximo para los motores                |
+| `max_velocity_pwm` | 255     | PWM maximo para el motor de traccion       |
 | `servo_center`     | 90.0    | Angulo central del servo                   |
 | `servo_range`      | 45.0    | Rango de giro del servo (± desde centro)   |
 | `goal_tolerance`   | 15.0    | Distancia para considerar "llegada" (px)   |
@@ -400,7 +396,7 @@ El timer de la interfaz ejecuta el ciclo principal cada 33ms (~30 FPS):
 1. **Capturar frame** de la camara
 2. **Detectar robot** (posicion + orientacion via marcadores de color)
 3. **Actualizar controlador** (Pure Pursuit si hay objetivo activo)
-4. **Enviar comando MQTT** al ESP32 (PWM motores + angulo servo)
+4. **Enviar comando MQTT** al ESP32 (PWM motor + angulo servo)
 5. **Dibujar anotaciones** sobre el frame (trayectoria, objetivo, etc.)
 6. **Actualizar interfaz** (labels, indicadores)
 
