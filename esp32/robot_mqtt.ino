@@ -2,18 +2,17 @@
  * Robot Ackermann - Control por ESP32 via MQTT
  *
  * Recibe comandos JSON desde el sistema de visión por computadora
- * y controla los motores DC y el servo de dirección.
+ * y controla UN motor DC y el servo de dirección.
  *
  * Topic MQTT de comandos: robot/cmd
- * Formato JSON: {"left_pwm":150, "right_pwm":150, "servo":90.0, "action":"move"}
+ * Formato JSON: {"pwm":150, "servo":90.0, "action":"move"}
  *
  * Topic MQTT de estado: robot/status
- * Formato JSON: {"battery":12.1, "status":"ok"}
+ * Formato JSON: {"wifi_rssi":-55, "status":"ok", "uptime_s":120}
  *
  * Conexiones ESP32:
- *   - Motor izquierdo:  ENA=GPIO 25, IN1=GPIO 26, IN2=GPIO 27
- *   - Motor derecho:    ENB=GPIO 14, IN3=GPIO 12, IN4=GPIO 13
- *   - Servo dirección:  GPIO 15
+ *   - Motor (tracción): ENA=GPIO 25, IN1=GPIO 26, IN2=GPIO 27
+ *   - Servo dirección:  GPIO 13
  *
  * Dependencias (instalar desde Arduino Library Manager):
  *   - PubSubClient (by Nick O'Leary)
@@ -27,58 +26,52 @@
 #include <ESP32Servo.h>
 
 // ===================== CONFIGURACIÓN WiFi =====================
-const char* WIFI_SSID     = "TU_RED_WIFI";
-const char* WIFI_PASSWORD = "TU_PASSWORD";
+const char* WIFI_SSID     = "HOME-CDD7";
+const char* WIFI_PASSWORD = "C552C1813411A8DC";
 
-// ===================== CONFIGURACIÓN MQTT =====================
-const char* MQTT_BROKER = "192.168.1.100";  // IP del broker (la PC)
-const int   MQTT_PORT   = 1883;
+const char* MQTT_BROKER   = "10.0.0.5";  // IP del broker (la PC)
+const int   MQTT_PORT    = 1883;
 const char* TOPIC_CMD    = "robot/cmd";
 const char* TOPIC_STATUS = "robot/status";
 
-// ===================== PINES MOTOR IZQUIERDO =====================
-const int PIN_ENA = 25;  // PWM motor izquierdo
-const int PIN_IN1 = 26;  // Dirección motor izquierdo
+// ===================== PINES MOTOR =====================
+const int PIN_ENA = 25;  // PWM motor
+const int PIN_IN1 = 26;  // Dirección motor
 const int PIN_IN2 = 27;
 
-// ===================== PINES MOTOR DERECHO =====================
-const int PIN_ENB = 14;  // PWM motor derecho
-const int PIN_IN3 = 12;  // Dirección motor derecho
-const int PIN_IN4 = 13;
-
 // ===================== PIN SERVO =====================
-const int PIN_SERVO = 15;
+const int PIN_SERVO = 13;
 
-// ===================== CANALES PWM ESP32 =====================
-const int PWM_CHANNEL_LEFT  = 0;
-const int PWM_CHANNEL_RIGHT = 1;
-const int PWM_FREQ = 1000;    // 1 kHz
-const int PWM_RESOLUTION = 8; // 8 bits (0-255)
+// ===================== CANAL PWM ESP32 =====================
+const int PWM_CHANNEL    = 0;
+const int PWM_FREQ       = 1000;   // 1 kHz
+const int PWM_RESOLUTION = 8;      // 8 bits → valores 0-255
 
 // ===================== OBJETOS GLOBALES =====================
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-Servo servoDirection;
+WiFiClient    espClient;
+PubSubClient  mqttClient(espClient);
+Servo         servoDirection;
 
-unsigned long lastStatusTime = 0;
-const unsigned long STATUS_INTERVAL = 2000; // Enviar estado cada 2s
+unsigned long lastStatusTime  = 0;
+const unsigned long STATUS_INTERVAL = 2000;  // Enviar estado cada 2 s
 
 // ===================== FUNCIONES MOTOR =====================
 
-void setupMotors() {
+void setupMotor() {
     pinMode(PIN_IN1, OUTPUT);
     pinMode(PIN_IN2, OUTPUT);
-    pinMode(PIN_IN3, OUTPUT);
-    pinMode(PIN_IN4, OUTPUT);
 
-    // Configurar canales PWM en ESP32
+    // Configurar canal PWM
     ledcAttach(PIN_ENA, PWM_FREQ, PWM_RESOLUTION);
-    ledcAttach(PIN_ENB, PWM_FREQ, PWM_RESOLUTION);
 
-    stopMotors();
+    stopMotor();
 }
 
-void setMotorLeft(int pwm) {
+/**
+ * Controla el motor de tracción.
+ * @param pwm  Valor PWM: positivo = avance, negativo = retroceso.
+ */
+void setMotor(int pwm) {
     if (pwm >= 0) {
         digitalWrite(PIN_IN1, HIGH);
         digitalWrite(PIN_IN2, LOW);
@@ -91,33 +84,16 @@ void setMotorLeft(int pwm) {
     ledcWrite(PIN_ENA, pwm);
 }
 
-void setMotorRight(int pwm) {
-    if (pwm >= 0) {
-        digitalWrite(PIN_IN3, HIGH);
-        digitalWrite(PIN_IN4, LOW);
-    } else {
-        digitalWrite(PIN_IN3, LOW);
-        digitalWrite(PIN_IN4, HIGH);
-        pwm = -pwm;
-    }
-    pwm = constrain(pwm, 0, 255);
-    ledcWrite(PIN_ENB, pwm);
-}
-
-void stopMotors() {
+void stopMotor() {
     digitalWrite(PIN_IN1, LOW);
     digitalWrite(PIN_IN2, LOW);
-    digitalWrite(PIN_IN3, LOW);
-    digitalWrite(PIN_IN4, LOW);
     ledcWrite(PIN_ENA, 0);
-    ledcWrite(PIN_ENB, 0);
-    servoDirection.write(90); // Centro
+    servoDirection.write(90);  // Centro
 }
 
 // ===================== CALLBACK MQTT =====================
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    // Parsear JSON
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
 
@@ -130,23 +106,21 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     const char* action = doc["action"] | "unknown";
 
     if (strcmp(action, "stop") == 0) {
-        stopMotors();
+        stopMotor();
         Serial.println("[CMD] STOP");
         return;
     }
 
     if (strcmp(action, "move") == 0) {
-        int leftPwm  = doc["left_pwm"]  | 0;
-        int rightPwm = doc["right_pwm"] | 0;
-        float servo  = doc["servo"]     | 90.0;
+        int   pwm        = doc["pwm"]   | 0;
+        float servoFloat = doc["servo"] | 90.0f;
 
-        setMotorLeft(leftPwm);
-        setMotorRight(rightPwm);
+        setMotor(pwm);
 
-        int servoAngle = constrain((int)servo, 45, 135);
+        int servoAngle = constrain((int)servoFloat, 45, 135);
         servoDirection.write(servoAngle);
 
-        Serial.printf("[CMD] L:%d R:%d S:%d\n", leftPwm, rightPwm, servoAngle);
+        Serial.printf("[CMD] PWM:%d  Servo:%d\n", pwm, servoAngle);
     }
 }
 
@@ -166,7 +140,7 @@ void setupWiFi() {
     Serial.println(WiFi.localIP());
 }
 
-// ===================== CONEXIÓN MQTT =====================
+// ===================== RECONEXIÓN MQTT =====================
 
 void reconnectMQTT() {
     while (!mqttClient.connected()) {
@@ -188,9 +162,9 @@ void reconnectMQTT() {
 
 void sendStatus() {
     JsonDocument doc;
-    doc["status"] = "ok";
+    doc["status"]   = "ok";
     doc["wifi_rssi"] = WiFi.RSSI();
-    doc["uptime_s"] = millis() / 1000;
+    doc["uptime_s"]  = millis() / 1000;
 
     char buffer[128];
     serializeJson(doc, buffer);
@@ -201,12 +175,12 @@ void sendStatus() {
 
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n=== Robot Ackermann - ESP32 MQTT ===");
+    Serial.println("\n=== Robot Ackermann 1-Motor - ESP32 MQTT ===");
 
-    setupMotors();
+    setupMotor();
 
     servoDirection.attach(PIN_SERVO);
-    servoDirection.write(90); // Centro
+    servoDirection.write(90);  // Centro
 
     setupWiFi();
 

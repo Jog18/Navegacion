@@ -1,13 +1,13 @@
 """
 Cliente MQTT para comunicación con el ESP32 del robot.
 
-Envía comandos de control (PWM motores y ángulo servo) al ESP32
+Envía comandos de control (PWM motor único y ángulo servo) al ESP32
 mediante el protocolo MQTT. El ESP32 se suscribe al topic de comandos
-y ejecuta las acciones sobre los motores.
+y ejecuta las acciones sobre el motor y el servo.
 
 Topics:
-    robot/cmd   → Comandos de control (Python → ESP32)
-    robot/status ← Estado del robot (ESP32 → Python)
+    robot/cmd    → Comandos de control (Python → ESP32)
+    robot/status ← Estado del robot   (ESP32 → Python)
 """
 
 import json
@@ -21,10 +21,9 @@ class MQTTClient:
 
     Formato del mensaje en 'robot/cmd':
         {
-            "left_pwm": int,        # PWM motor izquierdo [0-255]
-            "right_pwm": int,       # PWM motor derecho [0-255]
-            "servo": float,         # Ángulo servo dirección (grados)
-            "action": str           # "move" | "stop"
+            "pwm":    int,    # PWM motor de tracción [0-255]
+            "servo":  float,  # Ángulo servo dirección (grados)
+            "action": str     # "move" | "stop"
         }
     """
 
@@ -84,22 +83,20 @@ class MQTTClient:
         with self._lock:
             self._connected = False
 
-    def send_command(self, left_pwm, right_pwm, servo_angle):
+    def send_command(self, pwm, servo_angle):
         """
         Envía un comando de movimiento al ESP32.
 
         Args:
-            left_pwm: PWM motor izquierdo [0-255].
-            right_pwm: PWM motor derecho [0-255].
+            pwm:         PWM del motor de tracción [0-255].
             servo_angle: Ángulo del servo de dirección (grados).
         """
         if not self.connected:
             return
 
         payload = {
-            "left_pwm": int(left_pwm),
-            "right_pwm": int(right_pwm),
-            "servo": round(float(servo_angle), 1),
+            "pwm":    int(pwm),
+            "servo":  round(float(servo_angle), 1),
             "action": "move",
         }
         self._publish(self.topic_cmd, payload)
@@ -110,9 +107,8 @@ class MQTTClient:
             return
 
         payload = {
-            "left_pwm": 0,
-            "right_pwm": 0,
-            "servo": 90.0,
+            "pwm":    0,
+            "servo":  90.0,
             "action": "stop",
         }
         self._publish(self.topic_cmd, payload)

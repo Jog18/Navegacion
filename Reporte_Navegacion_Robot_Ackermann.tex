@@ -1,0 +1,295 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Paquetes ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{multicol}
+\usepackage{parskip}
+
+% --- Colores ---
+\definecolor{azulprincipal}{RGB}{0,60,130}
+\definecolor{azulsecundario}{RGB}{0,100,180}
+\definecolor{azullinea}{RGB}{0,120,200}
+\definecolor{gristexto}{RGB}{100,100,100}
+\definecolor{azultabla}{RGB}{0,80,160}
+\definecolor{azulclaro}{RGB}{235,245,255}
+
+% --- Estilos de sección ---
+\titleformat{\section}{\large\bfseries\color{azulprincipal}}{}{0em}{\thesection. }
+\titleformat{\subsection}{\normalsize\bfseries\color{azulsecundario}}{}{0em}{\thesubsection\hspace{0.5em}}
+\titlespacing{\section}{0pt}{12pt}{4pt}
+\titlespacing{\subsection}{0pt}{8pt}{2pt}
+
+% --- Encabezado y pie de página ---
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{azullinea}\leaders\hrule height \headrulewidth\hfill}}
+\fancyhead[R]{\small\color{gristexto} Sistema de Navegación Autónoma -- Robot Ackermann}
+\fancyfoot[C]{\small\color{gristexto} Página \thepage\ de \pageref{LastPage}}
+
+\usepackage{lastpage}
+
+% --- Hipervínculos ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=azulprincipal,
+    urlcolor=azulsecundario,
+}
+
+% --- Documento ---
+\begin{document}
+
+% ==================== PORTADA ====================
+\begin{center}
+    \vspace*{1cm}
+    {\Huge\bfseries\color{azulprincipal} Sistema de Navegación Autónoma}\\[0.5cm]
+    {\Large\bfseries\color{azulsecundario} Robot Ackermann con Visión por Computadora}\\[0.8cm]
+    {\large\itshape\color{gristexto} Documentación Técnica del Proyecto}\\[0.3cm]
+    {\large\color{gristexto} Marzo 2026}\\[0.5cm]
+    \textcolor{azullinea}{\rule{0.6\textwidth}{0.5pt}}
+\end{center}
+\vspace{0.5cm}
+
+% ==================== 1. INTRODUCCIÓN ====================
+\section{Introducción}
+
+Este proyecto implementa un sistema completo de navegación autónoma para un robot con cinemática Ackermann (tipo automóvil). El sistema integra visión por computadora, planificación de trayectorias, algoritmos de seguimiento de caminos y comunicación inalámbrica para controlar un robot físico basado en ESP32.
+
+El robot utiliza un \textbf{único motor DC} para la tracción y un \textbf{servo} para la dirección, siguiendo el modelo Ackermann puro donde la dirección se controla exclusivamente mediante el ángulo del servo. El robot opera dentro de un espacio de trabajo observado por una cámara cenital (vista superior). Un sistema de procesamiento en PC detecta la posición y orientación del robot mediante marcadores de color, calcula la trayectoria óptima hacia un objetivo y envía comandos de control al robot a través del protocolo MQTT a una frecuencia de 30~Hz.
+
+% ==================== 2. ARQUITECTURA ====================
+\section{Arquitectura del Sistema}
+
+El sistema sigue una arquitectura modular organizada en cinco componentes principales que forman un ciclo de control cerrado:
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabularx}{\textwidth}{l X l}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Módulo}} & \textcolor{white}{\textbf{Función Principal}} & \textcolor{white}{\textbf{Tecnología}} \\
+    \midrule
+    \texttt{vision/}         & Captura de cámara y detección del robot           & OpenCV, NumPy \\
+    \texttt{navigation/}     & Generación de objetivos y trayectorias             & Bézier, Pure Pursuit \\
+    \texttt{control/}        & Máquina de estados y conversión a comandos         & Python \\
+    \texttt{communication/}  & Comunicación MQTT con ESP32                        & paho-mqtt \\
+    \texttt{ui/}             & Interfaz gráfica con visualización en tiempo real   & PyQt5 \\
+    \texttt{esp32/}          & Firmware del robot (motor y servo)                  & Arduino/C++ \\
+    \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Flujo de Control (30 Hz)}
+
+\begin{enumerate}[nosep]
+    \item La cámara captura un frame.
+    \item El detector identifica los marcadores verde (frente) y azul (trasero) mediante segmentación HSV, obteniendo posición $(x, y)$ y orientación $(\theta)$.
+    \item El controlador ejecuta el algoritmo Pure Pursuit sobre la trayectoria Bézier planificada.
+    \item Se calculan los comandos de actuación (PWM del motor y ángulo del servo).
+    \item Los comandos se envían por MQTT al ESP32 en formato JSON.
+    \item La interfaz gráfica muestra la visualización en tiempo real.
+\end{enumerate}
+
+% ==================== 3. VISIÓN ====================
+\section{Módulo de Visión}
+
+La detección del robot se realiza mediante segmentación por color en el espacio HSV. El robot porta dos marcadores de al menos $3 \times 3$~cm:
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabular}{lcccc}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Marcador}} & \textcolor{white}{\textbf{Color}} & \textcolor{white}{\textbf{Rango H}} & \textcolor{white}{\textbf{Rango S}} & \textcolor{white}{\textbf{Rango V}} \\
+    \midrule
+    Frontal & Verde & 35--85   & 80--255 & 80--255 \\
+    Trasero & Azul  & 100--130 & 80--255 & 80--255 \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+El proceso incluye: conversión BGR$\rightarrow$HSV, creación de máscaras binarias, operaciones morfológicas de apertura y cierre para eliminar ruido, detección del contorno de mayor área para cada color, y cálculo de centroides mediante momentos de imagen. La posición del robot es el punto medio entre ambos centroides, y la orientación se obtiene con $\text{atan2}$ del vector frontal-trasero.
+
+% ==================== 4. NAVEGACIÓN ====================
+\section{Navegación y Planificación de Trayectorias}
+
+\subsection{Generación de Objetivos}
+
+El usuario define un vector de movimiento (distancia en píxeles y ángulo en grados) desde la interfaz gráfica. El módulo \texttt{TargetGenerator} proyecta este vector desde la pose actual del robot para calcular la posición y orientación objetivo.
+
+\subsection{Trayectorias Bézier Cúbicas}
+
+Se genera una curva Bézier cúbica con 80 puntos interpolados. Los puntos de control se calculan como:
+
+\[
+B(t) = (1-t)^3 P_0 + 3(1-t)^2 t\, P_1 + 3(1-t) t^2 P_2 + t^3 P_3, \quad t \in [0, 1]
+\]
+
+Donde $P_1 = P_0 + \frac{d}{3} \cdot \vec{u}_{\text{inicio}}$ y $P_2 = P_3 - \frac{d}{3} \cdot \vec{u}_{\text{meta}}$. Esta parametrización garantiza trayectorias suaves compatibles con las restricciones no-holonómicas del modelo Ackermann.
+
+\subsection{Algoritmo Pure Pursuit}
+
+El seguimiento de trayectoria utiliza el algoritmo Pure Pursuit, un método clásico y robusto para robots con cinemática tipo automóvil:
+
+\begin{enumerate}[nosep]
+    \item Encontrar el punto más cercano de la trayectoria al robot.
+    \item Buscar el punto de \textit{lookahead} a una distancia configurable (30~px por defecto).
+    \item Transformar el punto al marco local del robot.
+    \item Calcular la curvatura: $\kappa = \dfrac{2 \cdot y_{\text{local}}}{L_d^2}$
+    \item Obtener el ángulo de dirección Ackermann: $\delta = \arctan(L \cdot \kappa)$, donde $L$ es la distancia entre ejes (\textit{wheelbase} = 50~px).
+\end{enumerate}
+
+La velocidad se adapta inversamente al ángulo de dirección: a mayor giro, menor velocidad (rango 20\%--100\% del PWM máximo), mejorando la estabilidad en curvas.
+
+% ==================== 5. CONTROL ====================
+\section{Sistema de Control}
+
+\subsection{Máquina de Estados}
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Estado}} & \textcolor{white}{\textbf{Descripción}} & \textcolor{white}{\textbf{Transición}} \\
+    \midrule
+    IDLE       & Sin navegación activa    & $\rightarrow$ NAVIGATING al recibir objetivo \\
+    NAVIGATING & Siguiendo trayectoria    & $\rightarrow$ REACHED si distancia $<$ 15~px \\
+    REACHED    & Objetivo alcanzado       & $\rightarrow$ IDLE (automático) \\
+    ERROR      & Robot no detectado       & $\rightarrow$ NAVIGATING al redetectar \\
+    \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Conversión a Comandos de Actuación}
+
+El controlador convierte las salidas del Pure Pursuit en señales para el hardware. Al utilizar un \textbf{único motor DC} para la tracción, el esquema de control se simplifica respecto a configuraciones con dos motores:
+
+\begin{itemize}[nosep]
+    \item \textbf{Servo de dirección:} el ángulo se calcula como $90° - \delta$ (centrado en 90°, rango 45°--135°). La dirección se controla exclusivamente mediante el servo, siguiendo el modelo Ackermann puro.
+    \item \textbf{Motor de tracción:} un único valor PWM proporcional a la velocidad calculada por el Pure Pursuit. No se requiere control diferencial ya que un solo motor impulsa el vehículo.
+\end{itemize}
+
+\[
+\text{PWM} = v \times \text{PWM}_{\text{max}}, \qquad \text{Servo} = 90° - \delta
+\]
+
+% ==================== 6. COMUNICACIÓN ====================
+\section{Comunicación MQTT}
+
+La comunicación entre el PC y el ESP32 se realiza mediante el protocolo MQTT a través de un broker Mosquitto. Se utilizan dos tópicos:
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Tópico}} & \textcolor{white}{\textbf{Dirección}} & \textcolor{white}{\textbf{Contenido (JSON)}} \\
+    \midrule
+    \texttt{robot/cmd}    & PC $\rightarrow$ ESP32 & \texttt{\{pwm, servo, action\}} \\
+    \texttt{robot/status} & ESP32 $\rightarrow$ PC & \texttt{\{status, wifi\_rssi, uptime\_s\}} \\
+    \bottomrule
+\end{tabularx}
+\end{table}
+
+El ESP32 publica su estado cada 2 segundos e implementa reconexión automática. La acción puede ser \texttt{"move"} (movimiento) o \texttt{"stop"} (parada de emergencia). La comunicación es \textit{thread-safe} con locks para acceso concurrente.
+
+% ==================== 7. HARDWARE ====================
+\section{Configuración de Hardware}
+
+\subsection{Componentes del Robot}
+
+\begin{itemize}[nosep]
+    \item Microcontrolador: ESP32 con WiFi integrado
+    \item \textbf{Un único motor DC} de tracción controlado por puente H (L298N)
+    \item Servo para dirección (cinemática Ackermann pura)
+    \item Marcadores de color: verde (frente) y azul (trasero), mínimo $3 \times 3$~cm
+\end{itemize}
+
+El diseño utiliza un solo motor para la tracción, a diferencia de configuraciones con dos motores independientes. La dirección se controla exclusivamente mediante el servo, lo que simplifica el hardware (menos pines GPIO, un solo canal PWM, un solo puente H) y el software (sin cálculo de control diferencial).
+
+\subsection{Configuración de Pines ESP32}
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabular}{lll}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Componente}} & \textcolor{white}{\textbf{Pin GPIO}} & \textcolor{white}{\textbf{Función}} \\
+    \midrule
+    Motor ENA & 25 & PWM de tracción (único motor) \\
+    Motor IN1 & 26 & Dirección del motor (adelante/atrás) \\
+    Motor IN2 & 27 & Dirección del motor (adelante/atrás) \\
+    Servo     & 13 & Control de dirección Ackermann \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Infraestructura}
+
+\begin{itemize}[nosep]
+    \item Cámara USB en posición cenital sobre el área de trabajo ($640 \times 480$~px)
+    \item Red WiFi local conectando PC y ESP32
+    \item Broker MQTT Mosquitto (puerto 1883) ejecutándose en el PC o en la red
+\end{itemize}
+
+% ==================== 8. INTERFAZ GRÁFICA ====================
+\section{Interfaz Gráfica de Usuario}
+
+La aplicación PyQt5 presenta un diseño de dos paneles: el panel izquierdo muestra el video en vivo ($640 \times 480$) con superposiciones de la posición del robot (círculo cyan), trayectoria planificada (línea naranja), objetivo (cruz roja), punto de \textit{lookahead} (punto magenta) y cuadrícula de coordenadas. El panel derecho contiene controles agrupados: estado del robot ($X$, $Y$, $\theta$), vector de movimiento (distancia y ángulo con botones Enviar/Detener), información de navegación (distancia al objetivo, error de seguimiento), y configuración MQTT (IP del broker, puerto, estado de conexión).
+
+% ==================== 9. MODOS DE EJECUCIÓN ====================
+\section{Modos de Ejecución}
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Comando}} & \textcolor{white}{\textbf{Modo}} & \textcolor{white}{\textbf{Uso}} \\
+    \midrule
+    \texttt{python main.py}              & Estándar           & Cámara por defecto, broker local \\
+    \texttt{python main.py --camera 1}   & Cámara alternativa & Seleccionar dispositivo \\
+    \texttt{python main.py --image f.png}& Imagen estática    & Pruebas de detección \\
+    \texttt{python main.py --simulate}   & Simulación         & Sin cámara conectada \\
+    \texttt{python main.py --broker IP}  & Broker remoto      & ESP32 en otra red \\
+    \bottomrule
+\end{tabularx}
+\end{table}
+
+% ==================== 10. STACK TECNOLÓGICO ====================
+\section{Stack Tecnológico}
+
+\begin{table}[h!]
+\centering
+\rowcolors{2}{azulclaro}{white}
+\begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \rowcolor{azultabla}\textcolor{white}{\textbf{Tecnología}} & \textcolor{white}{\textbf{Versión}} & \textcolor{white}{\textbf{Propósito}} \\
+    \midrule
+    Python       & 3.8+       & Lenguaje principal del sistema \\
+    OpenCV       & $\geq$ 4.8.0  & Procesamiento de imagen y visión \\
+    NumPy        & $\geq$ 1.24.0 & Cálculos numéricos y vectoriales \\
+    PyQt5        & $\geq$ 5.15.0 & Interfaz gráfica de usuario \\
+    paho-mqtt    & $\geq$ 2.0.0  & Protocolo de comunicación MQTT \\
+    Matplotlib   & $\geq$ 3.7.0  & Visualización auxiliar \\
+    Arduino/C++  & --             & Firmware del ESP32 \\
+    PubSubClient & --             & Cliente MQTT en ESP32 \\
+    \bottomrule
+\end{tabularx}
+\end{table}
+
+\end{document}

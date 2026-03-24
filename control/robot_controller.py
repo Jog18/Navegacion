@@ -4,6 +4,9 @@ Módulo de control del robot.
 Integra la detección visual, la generación de objetivos, la planeación
 de trayectoria y el algoritmo de seguimiento Pure Pursuit en un ciclo
 de control cerrado.
+
+Adaptado para un robot con UN motor de tracción y un servo de dirección
+(configuración Ackermann simplificada).
 """
 
 import numpy as np
@@ -26,12 +29,11 @@ class RobotState(Enum):
 
 @dataclass
 class ControlCommand:
-    """Comando de control enviado al robot."""
+    """Comando de control enviado al robot (un motor + servo)."""
     steering_angle: float = 0.0    # Ángulo de dirección (rad)
-    velocity: float = 0.0          # Velocidad lineal normalizada
-    left_pwm: int = 0              # Señal PWM motor izquierdo
-    right_pwm: int = 0             # Señal PWM motor derecho
-    servo_angle: float = 90.0      # Ángulo del servo de dirección (grados)
+    velocity:       float = 0.0    # Velocidad lineal normalizada [0, 1]
+    pwm:            int   = 0      # Señal PWM motor de tracción [0-255]
+    servo_angle:    float = 90.0   # Ángulo del servo de dirección (grados)
 
 
 @dataclass
@@ -50,12 +52,12 @@ class NavigationInfo:
 
 class RobotController:
     """
-    Controlador principal del robot con cinemática Ackermann.
+    Controlador principal del robot Ackermann con un solo motor de tracción.
 
     Ciclo de control:
-    1. Obtener pose del robot (visión)
-    2. Si hay objetivo activo, calcular control Pure Pursuit
-    3. Convertir a comandos de actuador
+    1. Obtener pose del robot (visión).
+    2. Si hay objetivo activo, calcular control Pure Pursuit.
+    3. Convertir a comandos de actuador (PWM único + ángulo servo).
     """
 
     def __init__(self, wheelbase=50.0, max_steering_deg=35.0,
@@ -66,7 +68,7 @@ class RobotController:
             wheelbase: Distancia entre ejes en píxeles.
             max_steering_deg: Ángulo máximo de dirección en grados.
             lookahead: Distancia de anticipación Pure Pursuit en píxeles.
-            max_velocity_pwm: Valor PWM máximo para los motores.
+            max_velocity_pwm: Valor PWM máximo para el motor.
             servo_center: Ángulo central del servo de dirección.
             servo_range: Rango de giro del servo (±grados desde centro).
         """
@@ -175,27 +177,24 @@ class RobotController:
         if info.state != RobotState.NAVIGATING:
             return cmd  # Comando de parada (todo en cero)
 
-        # Ángulo del servo de dirección
-        steering_deg = np.rad2deg(info.steering)
-        cmd.servo_angle = self.servo_center - steering_deg  # Invertido por convención
-        cmd.servo_angle = np.clip(
-            cmd.servo_angle,
+        # --- Servo de dirección ---
+        steering_deg  = np.rad2deg(info.steering)
+        # Invertido según la convención mecánica del servo
+        servo_angle   = self.servo_center - steering_deg
+        cmd.servo_angle = float(np.clip(
+            servo_angle,
             self.servo_center - self.servo_range,
             self.servo_center + self.servo_range,
-        )
+        ))
 
-        # Velocidad PWM
-        pwm = int(info.velocity * self.max_velocity_pwm)
-        cmd.velocity = info.velocity
-        cmd.steering_angle = info.steering
-
-        # Diferencial simple para simular Ackermann en motores DC
-        steer_factor = info.steering / self.max_steering_rad
-        cmd.left_pwm = int(pwm * (1.0 + 0.3 * steer_factor))
-        cmd.right_pwm = int(pwm * (1.0 - 0.3 * steer_factor))
-
-        cmd.left_pwm = np.clip(cmd.left_pwm, 0, self.max_velocity_pwm)
-        cmd.right_pwm = np.clip(cmd.right_pwm, 0, self.max_velocity_pwm)
+        # --- Motor de tracción (PWM único) ---
+        cmd.pwm      = int(np.clip(
+            info.velocity * self.max_velocity_pwm,
+            0,
+            self.max_velocity_pwm,
+        ))
+        cmd.velocity        = info.velocity
+        cmd.steering_angle  = info.steering
 
         return cmd
 

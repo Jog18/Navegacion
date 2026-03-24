@@ -218,9 +218,9 @@ class MainWindow(QMainWindow):
         # Enviar comandos al ESP32 por MQTT
         if nav_info.state == RobotState.NAVIGATING:
             cmd = self.controller.compute_command(nav_info)
-            self.mqtt.send_command(cmd.left_pwm, cmd.right_pwm, cmd.servo_angle)
+            self.mqtt.send_command(cmd.pwm, cmd.servo_angle)
             self.lbl_mqtt_cmd.setText(
-                f"L:{cmd.left_pwm} R:{cmd.right_pwm} S:{cmd.servo_angle:.0f}°"
+                f"PWM:{cmd.pwm}  Servo:{cmd.servo_angle:.0f}°"
             )
         elif nav_info.state == RobotState.REACHED:
             self.mqtt.send_stop()
