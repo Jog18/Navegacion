@@ -1,8 +1,8 @@
 /*
- * Control de Motor DC + Servo Dirección con ESP32
+ * Control de Motor DC + Servo Dirección con ESP32 via MQTT
  *
- * Controla velocidad (PWM) de un motor DC via puente H
- * y dirección con un servomotor.
+ * Recibe comandos JSON por MQTT para controlar velocidad (PWM)
+ * de un motor DC y dirección con un servomotor.
  *
  * Conexiones ESP32:
  *   - IN1 (dirección motor): GPIO 1
@@ -10,21 +10,42 @@
  *   - ENA (PWM velocidad):   GPIO 21
  *   - Servo dirección:       GPIO 5
  *
- * Control por Serial (formato: pwm,servo):
- *   - pwm:   -255 a 255 (positivo=avance, negativo=retroceso, 0=frenar)
- *   - servo: 45 a 135 grados (90=recto)
- *   Ejemplos: "150,90"  -> avance recto
- *             "-100,60" -> retroceso girando a la izquierda
- *             "0,90"    -> frenar recto
+ * Topic MQTT de comandos: robot/cmd
+ * Formato JSON:
+ *   {"action":"move", "pwm":150, "servo":90}   -> avance recto
+ *   {"action":"move", "pwm":-100, "servo":60}   -> retroceso girando izquierda
+ *   {"action":"stop"}                            -> frenar y centrar servo
+ *
+ * Topic MQTT de estado: robot/status
+ * Formato JSON: {"status":"ok", "wifi_rssi":-55, "uptime_s":120}
+ *
+ * Dependencias (instalar desde Arduino Library Manager):
+ *   - PubSubClient (by Nick O'Leary)
+ *   - ArduinoJson  (by Benoit Blanchon)
+ *   - ESP32Servo
  */
 
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include <ESP32Servo.h>
 
-// ===================== PINES =====================
-const int PIN_IN1   = 1;   // Dirección motor
-const int PIN_IN2   = 3;   // Dirección motor
+// ===================== CONFIGURACION WiFi / MQTT =====================
+const char* WIFI_SSID     = "HOME-CDD7";
+const char* WIFI_PASSWORD = "C552C1813411A8DC";
+
+const char* MQTT_BROKER   = "10.0.0.5";  // IP del broker (la PC)
+const int   MQTT_PORT     = 1883;
+const char* TOPIC_CMD     = "robot/cmd";
+const char* TOPIC_STATUS  = "robot/status";
+
+// ===================== PINES MOTOR =====================
+const int PIN_IN1   = 1;   // Direccion motor
+const int PIN_IN2   = 3;   // Direccion motor
 const int PIN_ENA   = 21;  // PWM velocidad
-const int PIN_SERVO = 5;   // Servo dirección
+
+// ===================== PIN SERVO =====================
+const int PIN_SERVO = 5;
 
 // ===================== PWM ESP32 =====================
 const int PWM_FREQ       = 1000;  // 1 kHz
@@ -32,9 +53,16 @@ const int PWM_RESOLUTION = 8;     // 8 bits -> 0-255
 
 // ===================== SERVO =====================
 Servo servoDirection;
-const int SERVO_CENTER = 90;  // Ángulo recto
-const int SERVO_MIN    = 45;  // Máximo giro a un lado
-const int SERVO_MAX    = 135; // Máximo giro al otro lado
+const int SERVO_CENTER = 90;
+const int SERVO_MIN    = 45;
+const int SERVO_MAX    = 135;
+
+// ===================== OBJETOS GLOBALES =====================
+WiFiClient   espClient;
+PubSubClient mqttClient(espClient);
+
+unsigned long lastStatusTime = 0;
+const unsigned long STATUS_INTERVAL = 2000;  // Enviar estado cada 2 s
 
 // ===================== FUNCIONES MOTOR =====================
 
@@ -42,54 +70,35 @@ void setupMotor() {
     pinMode(PIN_IN1, OUTPUT);
     pinMode(PIN_IN2, OUTPUT);
 
-    // Asignar canal PWM al pin ENA
     ledcAttach(PIN_ENA, PWM_FREQ, PWM_RESOLUTION);
 
     stopMotor();
 }
 
-/**
- * Mueve el motor hacia adelante con la velocidad indicada.
- * @param speed  Valor PWM 0-255.
- */
 void motorForward(int speed) {
     digitalWrite(PIN_IN1, HIGH);
     digitalWrite(PIN_IN2, LOW);
     ledcWrite(PIN_ENA, constrain(speed, 0, 255));
 }
 
-/**
- * Mueve el motor hacia atrás con la velocidad indicada.
- * @param speed  Valor PWM 0-255.
- */
 void motorBackward(int speed) {
     digitalWrite(PIN_IN1, LOW);
     digitalWrite(PIN_IN2, HIGH);
     ledcWrite(PIN_ENA, constrain(speed, 0, 255));
 }
 
-/**
- * Frena el motor (ambos pines LOW + PWM a 0).
- */
 void stopMotor() {
     digitalWrite(PIN_IN1, LOW);
     digitalWrite(PIN_IN2, LOW);
     ledcWrite(PIN_ENA, 0);
+    servoDirection.write(SERVO_CENTER);
 }
 
-/**
- * Establece el ángulo del servo de dirección.
- * @param angle  45-135 grados. 90 = recto.
- */
 void setServo(int angle) {
     angle = constrain(angle, SERVO_MIN, SERVO_MAX);
     servoDirection.write(angle);
 }
 
-/**
- * Controla el motor con un solo valor.
- * @param pwm  -255 a 255. Positivo=avance, Negativo=retroceso, 0=frenar.
- */
 void setMotor(int pwm) {
     if (pwm > 0) {
         motorForward(pwm);
@@ -100,45 +109,29 @@ void setMotor(int pwm) {
     }
 }
 
-// ===================== SETUP =====================
+// ===================== CALLBACK MQTT =====================
 
-void setup() {
-    Serial.begin(115200);
-    Serial.println("=== Control Motor DC + Servo - ESP32 ===");
-    Serial.println("Pines: IN1=GPIO1, IN2=GPIO3, ENA=GPIO21, SERVO=GPIO5");
-    Serial.println("Formato Serial: pwm,servo");
-    Serial.println("  pwm:   -255 a 255 (avance/retroceso/frenar)");
-    Serial.println("  servo: 45 a 135   (90 = recto)");
-    Serial.println("Ejemplos: 150,90  | -100,60 | 0,90");
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload, length);
 
-    setupMotor();
+    if (error) {
+        Serial.print("[MQTT] Error JSON: ");
+        Serial.println(error.c_str());
+        return;
+    }
 
-    servoDirection.attach(PIN_SERVO);
-    servoDirection.write(SERVO_CENTER);
-}
+    const char* action = doc["action"] | "unknown";
 
-// ===================== LOOP =====================
+    if (strcmp(action, "stop") == 0) {
+        stopMotor();
+        Serial.println("[CMD] STOP");
+        return;
+    }
 
-void loop() {
-    if (Serial.available()) {
-        String input = Serial.readStringUntil('\n');
-        input.trim();
-
-        if (input.length() == 0) return;
-
-        // Parsear formato: pwm,servo
-        int commaIndex = input.indexOf(',');
-
-        int pwm = 0;
-        int servoAngle = SERVO_CENTER;
-
-        if (commaIndex > 0) {
-            pwm = input.substring(0, commaIndex).toInt();
-            servoAngle = input.substring(commaIndex + 1).toInt();
-        } else {
-            // Si solo envían un número, es solo PWM con servo recto
-            pwm = input.toInt();
-        }
+    if (strcmp(action, "move") == 0) {
+        int pwm        = doc["pwm"]   | 0;
+        int servoAngle = doc["servo"] | SERVO_CENTER;
 
         pwm = constrain(pwm, -255, 255);
         servoAngle = constrain(servoAngle, SERVO_MIN, SERVO_MAX);
@@ -146,8 +139,87 @@ void loop() {
         setMotor(pwm);
         setServo(servoAngle);
 
-        // Mostrar estado actual
-        const char* dir = (pwm > 0) ? "Avance" : (pwm < 0) ? "Retroceso" : "Detenido";
-        Serial.printf("%s | PWM: %d | Servo: %d°\n", dir, abs(pwm), servoAngle);
+        Serial.printf("[CMD] PWM:%d  Servo:%d\n", pwm, servoAngle);
+    }
+}
+
+// ===================== CONEXION WiFi =====================
+
+void setupWiFi() {
+    Serial.printf("Conectando a WiFi: %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println();
+    Serial.print("WiFi conectado. IP: ");
+    Serial.println(WiFi.localIP());
+}
+
+// ===================== RECONEXION MQTT =====================
+
+void reconnectMQTT() {
+    while (!mqttClient.connected()) {
+        Serial.print("Conectando a MQTT...");
+        String clientId = "ESP32Motor-" + String(random(0xffff), HEX);
+
+        if (mqttClient.connect(clientId.c_str())) {
+            Serial.println(" conectado!");
+            mqttClient.subscribe(TOPIC_CMD, 1);
+        } else {
+            Serial.printf(" error (rc=%d). Reintentando en 3s...\n",
+                          mqttClient.state());
+            delay(3000);
+        }
+    }
+}
+
+// ===================== ENVIAR ESTADO =====================
+
+void sendStatus() {
+    JsonDocument doc;
+    doc["status"]    = "ok";
+    doc["wifi_rssi"] = WiFi.RSSI();
+    doc["uptime_s"]  = millis() / 1000;
+
+    char buffer[128];
+    serializeJson(doc, buffer);
+    mqttClient.publish(TOPIC_STATUS, buffer);
+}
+
+// ===================== SETUP =====================
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\n=== Control Motor DC + Servo - ESP32 MQTT ===");
+    Serial.println("Pines: IN1=GPIO1, IN2=GPIO3, ENA=GPIO21, SERVO=GPIO5");
+
+    setupMotor();
+
+    servoDirection.attach(PIN_SERVO);
+    servoDirection.write(SERVO_CENTER);
+
+    setupWiFi();
+
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(mqttCallback);
+    mqttClient.setBufferSize(512);
+}
+
+// ===================== LOOP =====================
+
+void loop() {
+    if (!mqttClient.connected()) {
+        reconnectMQTT();
+    }
+    mqttClient.loop();
+
+    // Enviar estado periodicamente
+    if (millis() - lastStatusTime > STATUS_INTERVAL) {
+        sendStatus();
+        lastStatusTime = millis();
     }
 }
